@@ -21,7 +21,8 @@ The codebase is organized into a Python package named `ai` with clear separation
 │   ├── 📂 models/          # PyTorch Model architectures (e.g., MLP)
 │   ├── 📂 preprocessing/   # Sktime & Sklearn pipelines (Scaling, Lags, etc.)
 │   ├── 📂 runners/         # Scripts to execute training/inference jobs
-│   └── 📂 trainers/        # Training loops (Cross-Validation + Lightning)
+│   ├── 📂 trainers/        # Training loops (Cross-Validation + Lightning)
+│   └── 📂 visualization/   # Training and inference visualization tools
 │
 ├── 📂 notebooks/           # Jupyter Notebooks for exploration and demos
 ├── 📂 scripts/             # Helper scripts
