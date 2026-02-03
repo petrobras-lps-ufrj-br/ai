@@ -1,10 +1,24 @@
-from abc import ABC, abstractmethod
-from typing import Any
+__all__ = [
+    "PreProcessing",
+    "Lag",
+]
+
 import numpy as np
 import pandas as pd
 import collections
 
-from sklearn.preprocessing import StandardScaler as SklearnStandardScaler
+from abc import ABC, abstractmethod
+from typing import Any
+
+from sklearn.preprocessing import StandardScaler
+from sktime.forecasting.model_selection import SlidingWindowSplitter
+from sktime.forecasting.compose import ForecastingPipeline
+from sktime.transformations.series.summarize import WindowSummarizer
+from sktime.transformations.series.impute import Imputer
+from sktime.transformations.compose import TransformerPipeline
+from sktime.forecasting.model_selection import SlidingWindowSplitter
+from sktime.transformations.series.dropna import DropNA
+from sktime.transformations.series.subset import IndexSubset
 
 class PreProcessing(ABC):
     """
@@ -33,62 +47,30 @@ class PreProcessing(ABC):
         return self.transform(X)
 
 
-class StandardScale(PreProcessing):
-    """
-    StandardScaler wrapper that follows the PreProcessing interface.
-    Uses sklearn.preprocessing.StandardScaler internally.
-    """
-    def __init__(self):
-        self.scaler = SklearnStandardScaler()
 
-    def fit(self, X: Any, y: Any = None):
-        # Handle potential 3D input (batch, seq_len, features) for time series
-        # Standard scaler usually expects 2D. We might need to reshape or apply per channel.
-        # For simplicity in many time series tasks, we flatten to (N*T, F) or treat (N, T*F).
-        # However, usually we want to scale features independent of time step.
-        # If X is (N, T, F), we reshape to (N*T, F) fit, then reshape back?
-        # Or if X is (N, F), just fit.
+
+
+class Lag:
+    def __init__(self, lag , imputer_method = 'linear'):
+        self.lag = lag
+        self.imputer_method=imputer_method
         
-        # Let's assume input might be numpy array or similar
-        X_np = X if isinstance(X, np.ndarray) else np.array(X)
+    def __call__(self, df):
+
+        lags = [lag for lag in range(self.lag)] if self.lag>=0 else [ -1*(lag + 1) for lag in range(-1*self.lag)]
+        # This pipeline will process the entire DataFrame and return the result
+        pipeline = TransformerPipeline([
+            ("imputer", Imputer(method=self.imputer_method)),
+            ("lags"   , WindowSummarizer(
+                            lag_feature={"lag": lags},
+                            target_cols=df.columns.tolist(),
+                        )
+            ),
+            ("dropna", DropNA()),
+            ])
         
-        if X_np.ndim == 3:
-            N, T, F = X_np.shape
-            X_reshaped = X_np.reshape(-1, F)
-            self.scaler.fit(X_reshaped)
-        else:
-            self.scaler.fit(X_np)
-        return self
-
-    def transform(self, X: Any) -> Any:
-        X_np = X if isinstance(X, np.ndarray) else np.array(X)
-        
-        if X_np.ndim == 3:
-            N, T, F = X_np.shape
-            X_reshaped = X_np.reshape(-1, F)
-            X_scaled = self.scaler.transform(X_reshaped)
-            return X_scaled.reshape(N, T, F)
-        
-        return self.scaler.transform(X_np)
-
-
-def interpolate(df : pd.DataFrame, method='linear') -> pd.DataFrame :
-    return df.interpolate(method=method, limit_direction='both')
-
-def create_window_dataframe(df : pd.DataFrame, window_size : int, feature_cols : list[str], target_cols : list[str], concatenate : bool) -> pd.DataFrame:
-    data_inputs = collections.OrderedDict()
-    data_outputs = collections.OrderedDict()
-    for feature_name in feature_cols:
-        df_feature = df[feature_name].to_frame()
-        for lag in range(window_size - 1):
-            df_feature[f"{feature_name}_lag_{lag+1}"] = df_feature[feature_name].shift(lag+1)
-    
-        df_feature = df_feature.dropna()
-        data_inputs[feature_name] = df_feature
-
-    for target_col in target_cols:
-        data_outputs[target_col] = df[target_col].iloc[window_size-1::].to_frame()
-    if concatenate:
-        data_inputs = pd.concat(data_inputs.values(),axis=1)
-        data_outputs = pd.concat(data_outputs.values(),axis=1)
-    return data_inputs, data_outputs
+        output_df  = pipeline.fit_transform(df)
+        if self.lag < 0:
+            col_names = { col_name : col_name.replace('lag_-', 'next_') for col_name in output_df.columns.tolist() }
+            output_df = output_df.rename(columns=col_names)
+        return output_df

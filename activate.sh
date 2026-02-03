@@ -3,6 +3,8 @@ export VIRTUALENV_NAMESPACE='.ai-env'
 export LOGURU_LEVEL="DEBUG"
 export VIRTUALENV_PATH=$PWD/$VIRTUALENV_NAMESPACE
 
+export AI_DATA_PATH=$PWD/data
+
 if [ -d "$VIRTUALENV_PATH" ]; then
     echo "$VIRTUALENV_PATH exists."
     source $VIRTUALENV_PATH/bin/activate

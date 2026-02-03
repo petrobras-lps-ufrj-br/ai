@@ -22,9 +22,10 @@ class Trainer:
         self,
         model: pl.LightningModule,
         cv_strategy: Any,
-        callbacks: List[pl.Callback],
-        params: Dict[str, Any],
-        evaluators: List[Any],
+        callbacks: List[pl.Callback]=[],
+        evaluators: List[Any]=[],
+        accelerator : str='auto',
+        devices : str='auto'
     ):
         """
         Args:
@@ -37,14 +38,18 @@ class Trainer:
         """
         self.model = model
         self.cv_strategy = cv_strategy
-        self.callbacks = callbacks
-        self.params = params
+        self.callbacks   = callbacks
         self.evaluators = evaluators
+        self.accelerator = accelerator
+        self.devices = devices
 
     def fit(
         self, 
         dataset: Dataset, 
-        output_dir: str = "training_artifacts", 
+        num_epochs: int=1,
+        output_dir: str = "training_artifacts",
+        batch_size: int=32,
+        num_workers: int=1,
         specific_fold: Optional[int] = None
     ) -> List[Dict[str, float]]:
         """
@@ -69,29 +74,11 @@ class Trainer:
         if not hasattr(splitter, "split"):
             raise ValueError("cv_strategy must implement a 'split' method (sklearn-like).")
 
-        # Determine what to pass to split
-        # If dataset has 'data' attribute, use it (e.g. for StratifiedKFold or time series split logic)
-        # Otherwise, pass indices
-        if hasattr(dataset, "data"):
-            # If the dataset exposes the raw data (like the custom DataLoader)
-            # We try to use it. Note: If dataset.data is a DF, split usually works on it.
-            # If it is a tuple (X, y), we might need to unpack.
-            split_args = (dataset.data,)
-            # If the dataset happens to be X, y separated in .data, we might need adjustments
-            # For now, we assume dataset.data is sufficient for the splitter or the splitter ignores content (KFold)
-        else:
-            # Fallback: create dummy X array of length
-            split_args = (np.arange(len(dataset)),)
-
-        fold = 0
         results = []
-        print(split_args)
-        total_splits = splitter.get_n_splits(*split_args) if hasattr(splitter, 'get_n_splits') else '?'
+        total_splits = splitter.get_n_splits(dataset.index()) if hasattr(splitter, 'get_n_splits') else '?'
 
         # We assume dataset behaves like a list/array for Subset or has __getitem__
-        
-        for train_index, val_index in splitter.split(*split_args):
-            fold += 1
+        for fold, (train_index, val_index) in enumerate(splitter.split(dataset.index())):
             
             if specific_fold is not None and fold != specific_fold:
                 continue
@@ -106,20 +93,15 @@ class Trainer:
 
             # Create Subsets
             train_dataset = torch.utils.data.Subset(dataset, train_index)
-            val_dataset = torch.utils.data.Subset(dataset, val_index)
+            val_dataset   = torch.utils.data.Subset(dataset, val_index)
 
-            batch_size = self.params.get("batch_size", 32)
-            num_workers = self.params.get("num_workers", 0)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+            val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=0)
 
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-            val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
-
-            # 3. Setup Model
+            # Setup Model
             # Create a fresh copy of the model for this fold
             pl_module = copy.deepcopy(self.model)
-            # Inject params into the model instance
-            pl_module.params = self.params
-
+          
 
             # 4. Setup Callbacks
             # Deepcopy callbacks to avoid state sharing and adjust paths
@@ -136,12 +118,13 @@ class Trainer:
            
             # 5. Initialize Trainer
             trainer = pl.Trainer(
-                max_epochs=self.params.get("num_epochs", 10),
+                max_epochs=num_epochs,
                 callbacks=fold_callbacks,
                 default_root_dir=fold_dir,
                 enable_checkpointing=True,
-                accelerator=self.params.get("accelerator", "auto"),
-                devices=self.params.get("devices", "auto"),
+                accelerator=self.accelerator,
+                devices=self.devices,
+                enable_progress_bar=True,
             )
 
             # 6. Fit
@@ -160,22 +143,85 @@ class Trainer:
             #     history[evaluator.name] = ...
 
             # 7. Save Final Model Weights and Metrics
-            final_weights_path = os.path.join(fold_dir, "final_model.pt")
+            #final_weights_path = os.path.join(fold_dir, "final_model.pt")
             
             # Skipping Summary for now as it requires X, y
             # eval_summary = Summary(pl_module, current_X_val, current_y_val)
             # fold_eval_metrics = eval_summary.calculate_metrics()
             # logger.info(f"Fold {fold} Metrics: {fold_eval_metrics}")
             
-            fold_eval_metrics = {} # Empty for now
+            #fold_eval_metrics = {} # Empty for now
 
-            output_dict = {
-                "state_dict": pl_module.state_dict(),
-                "history": history,
-            }
-            torch.save(output_dict, final_weights_path)
+            #output_dict = {
+            #    "state_dict": pl_module.state_dict(),
+            #    "history": history,
+            #}
+            #torch.save(output_dict, final_weights_path)
             
             # 8. Collect metrics
-            results.append(fold_eval_metrics)
+            #results.append(fold_eval_metrics)
 
         return results
+
+
+
+
+
+if __name__ == "__main__":
+    
+    import sys
+    import os
+    import numpy as np
+    import pandas as pd
+    from sklearn.model_selection import TimeSeriesSplit
+    from ai.preprocessing import StandardScale, create_window_dataframe, interpolate
+    from ai.trainers.time_series import Trainer
+    from ai.models.model_v1 import Model_v1
+    from ai.evaluation import Summary
+    from ai.loaders import DataLoader_v1
+    import torch.nn as nn
+    import torch
+    import pytorch_lightning as pl
+    import collections
+
+    # Setup Components
+    cv = TimeSeriesSplit(n_splits=4)
+
+    col_names = {
+        "PH (CBM) 1st Stage Poly Head Dev"     : "input_1",
+        "PH (CBM) 1st Stage Press Rat Dev"     : "input_2",
+        "PH (CBM) 1st Stage ActCompr Poly Eff" : "input_3",
+        "PH (CBM) 1st Stg ActCompr Poly Head"  : "target",
+    }
+
+    feature_cols = ['input_1','input_2','input_3']
+    output_col = ["target"]
+
+    data_path = os.path.join(os.getenv("AI_DATA_PATH"), "compressor.csv")
+
+    dataset = DataLoader_v1(data_path, 
+                        window_size=10, 
+                        col_names=col_names,
+                        feature_cols=feature_cols, 
+                        target_cols=output_col)
+
+    print(dataset.inputs.shape)
+
+    model = Model_v1(input_dim=dataset.inputs.shape[1], n_hidden=32)
+    evaluators = [Summary(name="metrics")]
+    params = {
+        "batch_size": 32,
+        "num_epochs": 5,
+        "lr": 1e-3,
+        "optimizer": "Adam"
+    }
+
+    trainer = Trainer(
+        model=model,
+        cv_strategy=cv,
+        callbacks=[],
+        evaluators=evaluators,
+        params=params
+    )
+
+    trainer.fit(dataset, output_dir="output")
