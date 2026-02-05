@@ -45,7 +45,7 @@ class DataLoader_v1(Dataset):
 
     def load(self) -> Any:
 
-        df = pd.read_csv(self.path, index_col=0, parse_dates=True).iloc[0:100]
+        df = pd.read_csv(self.path, index_col=0, parse_dates=True)#.iloc[0:100]
 
         data = collections.OrderedDict()
 
